@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
 import numpy as np 
-
+import copy 
+LOG_STD_MAX = 2
+LOG_STD_MIN = -20
 #ok, so pretrain the vae first and then 
 class Encoder(nn.Module):
 	def __init__(self, input_shape, latent_size = 3, hidden_size = 128):
@@ -18,6 +20,8 @@ class Encoder(nn.Module):
 	def get_params(self,x, return_log = False):
 		
 		mean, log_std = torch.split(self(x),self.latent_size, dim = -1)
+		log_std = torch.clamp(
+			log_std, min=LOG_STD_MIN, max=LOG_STD_MAX)
 		if return_log:
 			return mean, log_std
 		else:
@@ -48,6 +52,8 @@ class Decoder(nn.Module):
 	def get_params(self,x, return_log = False):
 		
 		mean, log_std = torch.split(self(x),self.input_shape, dim = -1)
+		log_std = torch.clamp(
+			log_std, min=LOG_STD_MIN, max=LOG_STD_MAX)
 		if return_log:
 			return mean, log_std
 		else:
@@ -74,7 +80,7 @@ class WeightedVAE:
 		self.optim = torch.optim.Adam(params, lr=lr)
 		self.beta = 1
 
-	def train_step(self, x, w):
+	def train_step(self, x, w, log_prob= True):
 
 		statistics = dict() 
 		
@@ -82,7 +88,11 @@ class WeightedVAE:
 		z = dz.rsample()
 		dx = self.decoder.get_distribution(z)
 
-		nll = -dx.log_prob(x).sum(1)
+
+		if log_prob:
+			nll = -dx.log_prob(x).sum(1)
+		else:
+			nll = torch.nn.MSELoss()(dx.rsample(), x) 
 		#kl = torch.distributions.kl_divergence(self.encoder.get_distribution(x), 
 		#	torch.distributions.MultivariateNormal(torch.zeros(z.shape), torch.diag_embed(torch.ones(z.shape))))
 		kl = torch.distributions.kl_divergence(self.encoder.get_distribution(x), 
@@ -98,9 +108,15 @@ class WeightedVAE:
 		statistics['kl'] = kl.mean().detach() 
 		return statistics
 
-	def sample(self, n=100, check_log_prob = False):
-		z = torch.distributions.Normal(torch.zeros((n,self.encoder.latent_size)), torch.ones(n,self.encoder.latent_size)).sample()
-		sample = self.decoder.get_distribution(z).sample()
+	def sample(self, x = None, n=100, check_log_prob = False):
+		if x is not None:
+			with torch.no_grad():
+				dz = self.encoder.get_distribution(x)
+				z = dz.sample()
+				sample = self.decoder.get_distribution(z).sample() 
+		else:
+			z = torch.distributions.Normal(torch.zeros((n,self.encoder.latent_size)), torch.ones(n,self.encoder.latent_size)).sample()
+			sample = self.decoder.get_distribution(z).sample()
 		return sample 
 
 
@@ -115,7 +131,7 @@ class WeightedVAE:
 			if verbal: print(statistics)
 
 	def initiate(self, x):
-		w = torch.ones(len(x))
+		w = torch.ones(len(x)).reshape(-1,1)
 		self.train(x, w)
 
 
@@ -123,43 +139,143 @@ class WeightedVAE:
 
 
 class ForwardModel(nn.Module):
-	def __init__(self, task, 
+	def __init__(self, 
 		input_shape, 
 		embedding_size = 50,
-		hidden_size = 128, num_layers = 1):
+		hidden_size = 128, num_layers = 1, lr=1e-3):
 		super().__init__()
 
-		layers = nn.Sequential(
+		self.layers = nn.Sequential(
 			nn.Linear(input_shape,hidden_size),
 			nn.ReLU(),
 			nn.Linear(hidden_size, 2))
 
+		self.entropy_coef = 5
+		self.optim = torch.optim.Adam(self.parameters(), lr = lr)
+
 	def forward(self, x):
+		if not isinstance(x, torch.Tensor):
+			x = torch.FloatTensor(x)
 		return self.layers(x)
 
 	def get_params(self,x, return_log = False):
 
-		mean, log_std = torch.split(self(x),2, axis = -1)
+		mean, log_std = torch.split(self(x),1, dim=-1)
+		log_std = torch.clamp(
+			log_std, min=LOG_STD_MIN, max=LOG_STD_MAX)
 		if return_log:
 			return mean, log_std
 		else:
 			return mean, log_std.exp()
 
 	def get_distribution(self, x):
-		return torch.distributions.Normal(self.get_params(x))
+		mean, std = self.get_params(x)
+		return torch.distributions.Normal(mean, std)
+
+	def train_step(self, x, y, w, log_prob= False, include_entropy= True):
+		statistics = {}
+
+		d = self.get_distribution(x)
+		if log_prob:
+			nll = -d.log_prob(y)
+		else:
+			pred = d.rsample()
+			nll = torch.nn.MSELoss()(pred, y)
+			if include_entropy:
+				#nll = nll 
+				nll = nll - self.entropy_coef* d.entropy().mean() 
+
+		weighted_nll = nll * w
+
+		self.optim.zero_grad()
+		weighted_nll.mean().backward()
+		self.optim.step()
+
+		statistics['nll'] = nll.mean().detach()
+		statistics['weighted_nll'] = weighted_nll.mean().detach() 
+		if include_entropy:
+			statistics['entorpy'] = d.entropy().mean().detach() 
+		return statistics
+
+	def train(self, x, y,w, train_step = 1000, batch_size = 128, verbal = True):
+
+		for i in range(3000):
+
+			idx= np.random.permutation(len(x))[:batch_size]
+			x_batch = torch.FloatTensor(x[idx])
+			w_batch = torch.FloatTensor(w[idx])
+			y_batch = torch.FloatTensor(y[idx].reshape(-1,1))
+			statistics = self.train_step(x_batch, y_batch, w_batch)
+
+			if verbal: print(statistics)
+
+	def initiate(self, x,y):
+		w = torch.ones(len(x)).reshape(-1,1 )
+		self.train(x, y, w)
 
 
-class Ensemble:
-	def __init__(self):
-		self.forward
-
-		self.bootstraps=1
 
 
-	def train_step(self, x, y, b, w):
-		statistics = dict()
-		for i in range(self.bootstraps):
-			fm = self.forward_models[i]
+class CBAES:
+
+	def __init__(self, vae = None, fm=None):
+		self.vae = WeightedVAE().initiate(x,y) if vae is None else vae 
+		self.fm = ForwardModel().initiate(x,y) if fm is None else fm 
+		self.initial_vae = copy.deepcopy(self.vae)
+
+		self.vae_train_epochs = 1000
+
+	def get_data(self,x ):
+		"""
+		Args: 
+			x-> training batch of x
+		Returns: 
+			gamma-> Qth percentile in terms of score of the generated samples
+			vae_weight-> previous weight * cdf weights
+
+		"""
+		if not isinstance(x,torch.Tensor):
+			x = torch.FloatTensor(x)
+
+		#sample new x and get its score 
+		vaedata = self.vae.sample(x)
+		dist = self.fm.get_distribution(vaedata)
+
+		top_data, gamma = self.return_topk(dist.sample(), vaedata)
+		cdf_weights = self.get_cdf_weights(dist, gamma)
+
+		return cdf_weights
+
+	def train(self, x, y): 
+
+		weights = self.get_data(x)
+		assert len(weights) == len(x)
+
+
+
+		self.vae.train(x, weights, epochs = self.vae_train_epochs)
+
+
+
+
+	@staticmethod
+	def return_topk(sample,data, percentile = 0.1):
+	    k = len(sample) * percentile
+	    top = torch.topk(sample.reshape(-1),int(k))
+	    return data[top.indices], top.values[-1].item() 
+
+	@staticmethod 
+	def get_cdf_weights(dist, gamma):
+		"""
+		gamma is float 
+		"""
+		weights = 1-dist.cdf(torch.Tensor([gamma]))
+		return weights
+
+
+
+
+
 
 
 #wait so you are updating the model with the updated x and an old y? 
