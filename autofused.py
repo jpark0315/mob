@@ -98,7 +98,9 @@ class WeightedVAE:
 		kl = torch.distributions.kl_divergence(self.encoder.get_distribution(x), 
 			torch.distributions.Normal(torch.zeros(z.shape), torch.ones(z.shape))).sum(1)
 		#print(w.shape, kl.shape, nll.shape )
-		total_loss = (w*(self.beta * kl + nll)).mean()
+		#total_loss = (w*(self.beta * kl + nll)).mean()
+		nll = nll * w 
+		total_loss = (self.beta * kl + nll).mean()
 		#total_loss = nll.mean()
 		self.optim.zero_grad()
 		total_loss.backward()
@@ -126,7 +128,7 @@ class WeightedVAE:
 		for i in range(epochs):
 			idx= np.random.permutation(len(x))[:batch_size]
 			x_batch = torch.FloatTensor(x[idx])
-			w_batch = torch.FloatTensor(w[idx])
+			w_batch = torch.FloatTensor(w[idx]).reshape(-1,1)
 			statistics = self.train_step(x_batch, w_batch)	
 			if verbal: print(statistics)
 
@@ -225,7 +227,7 @@ class CBAES:
 
 		self.vae_train_epochs = 1000
 
-	def get_data(self,x ):
+	def get_data(self,x, weight_from_fm = False):
 		"""
 		Args: 
 			x-> training batch of x
@@ -241,19 +243,30 @@ class CBAES:
 		vaedata = self.vae.sample(x)
 		dist = self.fm.get_distribution(vaedata)
 
-		top_data, gamma = self.return_topk(dist.sample(), vaedata)
-		cdf_weights = self.get_cdf_weights(dist, gamma)
+		if weight_from_fm: 
+			score = dist.sample()
+			print(score.mean())
+			weight = (score-min(score))/(max(score)-min(score))
 
-		return cdf_weights
+		else:
 
-	def train(self, x, y): 
+			top_data, gamma = self.return_topk(dist.sample(), vaedata)
+			cdf_weights = self.get_cdf_weights(dist, gamma)
 
-		weights = self.get_data(x)
-		assert len(weights) == len(x)
+			weight = cdf_weights 
+
+
+		return vaedata, weight
+
+	def train(self, x, y, verbal = False, weight_from_fm = True ): 
+
+		new_x, weights = self.get_data(x, weight_from_fm =weight_from_fm)
+		assert len(weights) == len(new_x)
+		assert new_x.shape == x.shape 
 
 
 
-		self.vae.train(x, weights, epochs = self.vae_train_epochs)
+		self.vae.train(new_x, weights, epochs = self.vae_train_epochs, verbal = verbal)
 
 
 
