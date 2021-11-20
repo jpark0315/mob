@@ -110,7 +110,7 @@ class WeightedVAE:
 		statistics['kl'] = kl.mean().detach() 
 		return statistics
 
-	def sample(self, x = None, n=100, check_log_prob = False):
+	def sample(self, x = None, n=100, check_log_prob = False, return_dist = False):
 		if x is not None:
 			with torch.no_grad():
 				dz = self.encoder.get_distribution(x)
@@ -118,8 +118,10 @@ class WeightedVAE:
 				sample = self.decoder.get_distribution(z).sample() 
 		else:
 			z = torch.distributions.Normal(torch.zeros((n,self.encoder.latent_size)), torch.ones(n,self.encoder.latent_size)).sample()
-			sample = self.decoder.get_distribution(z).sample()
-		return sample 
+			dist = self.decoder.get_distribution(z)
+			sample = dist.sample()
+
+		return dist if return_dist else sample 
 
 
 
@@ -243,6 +245,11 @@ class CBAES:
 		vaedata = self.vae.sample(x)
 		dist = self.fm.get_distribution(vaedata)
 
+		#How does the newly created x fare in logprob vs the old vae? 
+		vae_dist = self.vae.sample(n = len(vaedata), return_dist=True)
+		initial_vae_dist = self.initial_vae.sample(n = len(vaedata), return_dist = True)
+		logprob, initial_logprob = vae_dist.log_prob(vaedata).mean().detach().item(), initial_vae_dist.log_prob(vaedata).mean().detach().item()
+
 		if weight_from_fm: 
 			score = dist.sample()
 			print(score.mean())
@@ -256,26 +263,42 @@ class CBAES:
 			weight = cdf_weights 
 
 
-		return vaedata, weight
+		return vaedata, weight, logprob, initial_logprob
 
-	def train(self, x, y, verbal = False, weight_from_fm = True ): 
+	def train(self, x, y,coef, verbal = False, weight_from_fm = True, verbose = True): 
 
-		new_x, weights = self.get_data(x, weight_from_fm =weight_from_fm)
+		new_x, weights, lp,ilp = self.get_data(x, weight_from_fm =weight_from_fm)
 		assert len(weights) == len(new_x)
 		assert new_x.shape == x.shape 
 
-
+		if verbose:
+			self.evaluate(coef, x = x )
+			print('lp,ilp:' ,lp, ilp)
 
 		self.vae.train(new_x, weights, epochs = self.vae_train_epochs, verbal = verbal)
 
 
 
-
+	def evaluate(self, coef, x = None):
+	    #evaluate vae and fm 
+	    
+	    if x is not None:
+	        x = torch.Tensor(x)
+	    sample = self.vae.sample(x = x).numpy() 
+	    
+	    true_score = sample @ coef
+	    fake_score = self.fm.get_distribution(sample).sample()
+	    
+	    top_data, gamma, top_indices = self.return_topk(fake_score,sample, percentile = 0.2)
+	    
+	    print('Average Models score vs true score:',true_score.mean(), fake_score.mean().item())
+	    print('Top Percentile Models score vs true score:', true_score[top_indices].mean(), fake_score[top_indices].mean().item())
+	    
 	@staticmethod
 	def return_topk(sample,data, percentile = 0.1):
 	    k = len(sample) * percentile
 	    top = torch.topk(sample.reshape(-1),int(k))
-	    return data[top.indices], top.values[-1].item() 
+	    return data[top.indices], top.values[-1].item(), top.indices 
 
 	@staticmethod 
 	def get_cdf_weights(dist, gamma):
