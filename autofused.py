@@ -287,10 +287,12 @@ class CBAES:
 	    sample = self.vae.sample(x = x).numpy() 
 	    
 	    true_score = sample @ coef
-	    fake_score = self.fm.get_distribution(sample).sample()
+	    fake_score_dist = self.fm.get_distribution(sample )
+	    fake_score = fake_score_dist.sample()
 	    
-	    top_data, gamma, top_indices = self.return_topk(fake_score,sample, percentile = 0.2)
+	    top_data, gamma, top_indices = self.return_topk(fake_score,sample, percentile = 0.05)
 	    
+	    print('Models Likelihood of true score', fake_score_dist.log_prob(torch.Tensor(sample@coef)).mean().detach().item())
 	    print('Average Models score vs true score:',true_score.mean(), fake_score.mean().item())
 	    print('Top Percentile Models score vs true score:', true_score[top_indices].mean(), fake_score[top_indices].mean().item())
 	    
