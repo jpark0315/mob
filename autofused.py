@@ -36,6 +36,7 @@ class Encoder(nn.Module):
 		return torch.distributions.Normal(mean, log_std)
 
 
+
 class Decoder(nn.Module):
 	def __init__(self,input_shape, latent_size = 3,hidden_size = 128):
 		super().__init__()
@@ -176,18 +177,20 @@ class ForwardModel(nn.Module):
 		mean, std = self.get_params(x)
 		return torch.distributions.Normal(mean, std)
 
-	def train_step(self, x, y, w, log_prob= False, include_entropy= True):
+	def train_step(self, x, y, w, log_prob= True, include_entropy= False):
 		statistics = {}
-
+		#print(include_entropy)
 		d = self.get_distribution(x)
 		if log_prob:
 			nll = -d.log_prob(y)
+
 		else:
 			pred = d.rsample()
 			nll = torch.nn.MSELoss()(pred, y)
-			if include_entropy:
-				#nll = nll 
-				nll = nll - self.entropy_coef* d.entropy().mean() 
+
+		if include_entropy:
+			#nll = nll 
+			nll = nll - self.entropy_coef* d.entropy().mean() 
 
 		weighted_nll = nll * w
 
@@ -197,8 +200,8 @@ class ForwardModel(nn.Module):
 
 		statistics['nll'] = nll.mean().detach()
 		statistics['weighted_nll'] = weighted_nll.mean().detach() 
-		if include_entropy:
-			statistics['entorpy'] = d.entropy().mean().detach() 
+		
+		statistics['entorpy'] = d.entropy().mean().detach() 
 		return statistics
 
 	def train(self, x, y,w, train_step = 1000, batch_size = 128, verbal = True):
@@ -278,29 +281,31 @@ class CBAES:
 		self.vae.train(new_x, weights, epochs = self.vae_train_epochs, verbal = verbal)
 
 
-
 	def evaluate(self, coef, x = None):
-	    #evaluate vae and fm 
-	    
-	    if x is not None:
-	        x = torch.Tensor(x)
-	    sample = self.vae.sample(x = x).numpy() 
-	    
-	    true_score = sample @ coef
-	    fake_score_dist = self.fm.get_distribution(sample )
-	    fake_score = fake_score_dist.sample()
-	    
-	    top_data, gamma, top_indices = self.return_topk(fake_score,sample, percentile = 0.05)
-	    
-	    print('Models Likelihood of true score', fake_score_dist.log_prob(torch.Tensor(sample@coef)).mean().detach().item())
-	    print('Average Models score vs true score:',true_score.mean(), fake_score.mean().item())
-	    print('Top Percentile Models score vs true score:', true_score[top_indices].mean(), fake_score[top_indices].mean().item())
-	    
+		#evaluate vae and fm 
+		
+		if x is not None:
+			x = torch.Tensor(x)
+		sample = self.vae.sample(x = x).numpy() 
+		
+		if isinstance(coef, np.ndarray):
+			true_score = sample @ coef
+		else:
+			true_score = coef.predict(coef.denormalize_x(sample))
+		fake_score_dist = self.fm.get_distribution(sample )
+		fake_score = fake_score_dist.sample()
+		
+		top_data, gamma, top_indices = self.return_topk(fake_score,sample, percentile = 0.05)
+		
+		print('Models Likelihood of true score', fake_score_dist.log_prob(torch.Tensor(true_score)).mean().detach().item())
+		print('Average Models score vs true score:',true_score.mean(), fake_score.mean().item())
+		print('Top Percentile Models score vs true score:', true_score[top_indices].mean(), fake_score[top_indices].mean().item())
+		print('Top true score, top fake score', true_score.max(), fake_score.max())
 	@staticmethod
 	def return_topk(sample,data, percentile = 0.1):
-	    k = len(sample) * percentile
-	    top = torch.topk(sample.reshape(-1),int(k))
-	    return data[top.indices], top.values[-1].item(), top.indices 
+		k = len(sample) * percentile
+		top = torch.topk(sample.reshape(-1),int(k))
+		return data[top.indices], top.values[-1].item(), top.indices 
 
 	@staticmethod 
 	def get_cdf_weights(dist, gamma):
@@ -316,4 +321,16 @@ class CBAES:
 
 
 
-#wait so you are updating the model with the updated x and an old y? 
+
+"""
+experiment ideas:
+ensembling f 
+
+generalization: 
+vae representation learning for training+generated samples, 
+vae representation learning but with a shared encoder 
+vae encoder trained to minimize training loss as well? 
+regularization technique from papers 
+DANN 
+
+"""

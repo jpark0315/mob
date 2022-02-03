@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np 
-
+import copy 
 
 class ForwardModel(nn.Module):
 	def __init__(self, 
@@ -22,14 +22,16 @@ class ForwardModel(nn.Module):
 
 class ConservativeObjectiveModel:
 	def __init__(self, 
-		forward_model, 
-		 forward_model_lr=0.001, alpha=5.0,
+		forward_model, task, 
+		 forward_model_lr=0.001, alpha=1.0,
 		 alpha_lr=0.01, overestimation_limit=0.5,
 		 particle_lr=0.05, particle_gradient_steps=50,
-		 entropy_coefficient=0.9, noise_std=0.0):
+		 entropy_coefficient=0.9, noise_std=0.2):
 
 		self.forward_model = forward_model
 		self.forward_model_opt = torch.optim.Adam(self.forward_model.parameters(), lr = forward_model_lr)
+
+		#self.forward_models = [copy.deepcopy(forward_model) for i in range()]
 
 		#self.log_alpha = torch.autograd.Variable(torch.log(torch.Tensor(alpha)), requires_grad = True)
 		#self.alpha = self.log_alpha.exp()
@@ -45,8 +47,9 @@ class ConservativeObjectiveModel:
 		self.train_step = 100
 		self.batch_size = 64
 
+		self.task = task 
 
-	def optimize(self, x, steps, **kwargs):
+	def optimize(self, x, steps, verbose = False , **kwargs):
 		"""
 		Args:
 			x: Tensor, starting point for the optimizer that will be updated 
@@ -57,20 +60,27 @@ class ConservativeObjectiveModel:
 
 		"""
 
-		def gradient_step(xt):
+		def gradient_step(xt, verbose = verbose):
 			 xt.requires_grad = True 
+			 shuffled_xt = x[torch.randperm(len(x))]
+			 entropy = torch.nn.MSELoss()(shuffled_xt, xt)
+			 loss = -self.forward_model(xt) + self.entropy_coefficient * entropy 
+			 loss.backward(torch.ones(len(xt)).reshape(-1,1))
 
-			 loss = -self.forward_model(xt).mean()
-			 loss.backward()
 
 			 xt = xt.detach()- self.particle_lr * xt.grad
+			 if verbose:
+			 	#print(loss)
+			 	print(entropy)
+			 	print('loss:',loss.detach().mean().item())
+			 	print('L1NORM', torch.norm(xt.mean(0), p=1))
 			 return xt 
 
 		for i in range(steps):
 
 			x = gradient_step(x)
 
-		return x 
+		return x.detach() 
 
 
 	def corrupt(self, x):
@@ -119,12 +129,26 @@ class ConservativeObjectiveModel:
 		alpha_loss = self.alpha* self.overestimation_limit - self.alpha * overestimation
 		statistics['alpha'] = self.alpha
 
-		model_loss = mse+ self.alpha * overestimation.mean()
+		model_loss = mse#+ self.alpha * overestimation.mean()
 
 		self.forward_model_opt.zero_grad()
 		model_loss.backward()
 		self.forward_model_opt.step() 
 
+		optimized_score = self.task.predict(self.task.denormalize_x(x_neg.detach().numpy()))
+		og_score = self.task.predict(self.task.denormalize_x(x.detach().numpy()))
+
+		# with torch.no_grad():
+		# 	print(torch.Tensor(og_score), d_pos )
+		# 	og_mse = torch.nn.MSELoss(torch.Tensor(og_score), d_pos)
+		# 	op_mse = torch.nn.MSELoss(torch.Tensor(optimized_score), d_neg)
+		statistics['og_mse'] = og_mse 
+		statistics['op_mse'] = op_mse #how correct is f on the og and op?  
+		statistics['op_score_max'] = optimized_score.max() 
+		statistics['op_score_mean'] = optimized_score.mean() 
+		statistics['og_score_max'] = og_score.max() 
+		statistics['og_score_mean'] = og_score.mean() 
+		
 		return statistics 
 
 
@@ -140,12 +164,15 @@ class ConservativeObjectiveModel:
 				statistics = self.train_step_(x_batch,y_batch)
 			else:
 				statistics = self.naive_train_step(x_batch, y_batch )
+
 			print(statistics)
+			print()
+
+
 
 
 	
-
-
+			
 
 
 
